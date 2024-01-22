@@ -2,19 +2,6 @@
 
 FROM --platform=linux/amd64 ubuntu:jammy as openwrt-build-stage
 ARG DEBIAN_FRONTEND=noninteractive
-ARG USERNAME=sea
-ARG PASSWORD=123456
-ARG WORKSPACE=/home/${USERNAME}/ws
-
-# Create a new user
-RUN useradd -m -s /bin/bash ${USERNAME}
-
-# Set the user's password
-RUN echo "root:${PASSWORD}"        | chpasswd
-RUN echo "${USERNAME}:${PASSWORD}" | chpasswd
-
-# Add the new user to the sudo group
-RUN usermod -aG sudo ${USERNAME}
 
 # setup mirror sources
 RUN <<EOF
@@ -48,6 +35,7 @@ apt install -q -y --no-install-recommends \
     make                                  \
     wget                                  \
     git                                   \
+    curl                                  \
     cmake                                 \
     tzdata                                \
     net-tools                             \
@@ -70,7 +58,9 @@ apt install -q -y --no-install-recommends \
     libssl-dev                            \
     rsync                                 \
     zlib1g-dev                            \
-
+    software-properties-common            \
+    lsb-release                           \
+    gnupg
 
 echo 'Asia/Shanghai' > /etc/timezone
 
@@ -80,73 +70,42 @@ pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 EOF
 
-USER ${USERNAME}
-WORKDIR ${WORKSPACE}
-COPY --chown=${USERNAME}:${USERNAME} openwrt ./openwrt
-#RUN <<EOF
-## Download the sources
-#git clone https://git.openwrt.org/openwrt/openwrt.git
-#EOF
-
-WORKDIR ${WORKSPACE}/openwrt
+# Setup ros humble resoures
 RUN <<EOF
-<<COMMENT
-# Update the sources
-git pull
 
-# Select a specific code revision
-# OpenWrt 22.03.5 r20134-5f15225c1e
-# LuCI openwrt-22.03 branch git-23.119.80898-65ef406
-git checkout v22.03.5
+# set locale
+locale
+locale-gen en_US en_US.UTF-8
+update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+export LANG=en_US.UTF-8
+locale
 
-# Update the feeds
-./scripts/feeds update -a
-./scripts/feeds install -a
+# setup sources
+add-apt-repository universe
+curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 
-# Configure the firmware image
-make menuconfig
+#echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu jammy main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
-# Optional: configure the kernel (usually not required)
-# Don't, unless have a strong reason to
-make -j$(nproc) kernel_menuconfig
-
-# Build the firmware image
-make -j$(nproc) defconfig download clean world
-
-
-cd bin/targets/bcm27xx/bcm2711/
-tar -xvf openwrt-sdk-bcm27xx-bcm2711_gcc-11.2.0_musl.Linux-x86_64.tar.xz
-cd openwrt-sdk-bcm27xx-bcm2711_gcc-11.2.0_musl.Linux/
-git clone https://github.com/openwrt/packages.git
-git checkout openwrt-19.07
-mv packages/libs/opencv/ package/
-rm -rf packages/
-./scripts/feeds update -a
-./scripts/feeds install opencv
-make package/opencv/download
-make package/opencv/prepare
-make -j$(nproc) V=s package/opencv/compile
-# aarch64-openwrt-linux-musl-g++: error: unrecognized command-line option '--param=ipcp-unit-growth=100000'; did you mean '--param=ipa-cp-unit-growth='?
-# vi ./build_dir/target-aarch64_cortex-a72_musl/opencv-4.1.1/3rdparty/carotene/CMakeLists.txt ===> ipcp-unit-growth=100000 ===> ipa-cp-unit-growth=100000
-
-
-
-./scripts/feeds install mjpg-streamer
-make V=s package/mjpg-streamer/download
-make V=s package/mjpg-streamer/prepare
-make -j$(nproc) V=s package/mjpg-streamer/compile
-make V=s package/mjpg-streamer/clean
-
-
-
-
-make package/opencv/clean
-make package/index
-COMMENT
+apt update
 
 EOF
 
-USER root
+# Install ros packages
+RUN <<EOF
+
+apt install -q -y --no-install-recommends \
+    ros-humble-ros-base                   \
+    ros-humble-rviz2                      \
+    ros-humble-navigation2                \
+    ros-humble-nav2-bringup               \
+    ros-humble-turtlebot3-gazebo
+
+EOF
+
+# Copy gazebo models files
+ADD osrf/gazebo_models /root/.gazebo/models
+
 RUN <<EOF
 
 cat << EOT > /startup.sh
@@ -164,9 +123,18 @@ echo "if [ -f /etc/bash_completion ] && ! shopt -oq posix; then" >> /root/.bashr
 echo "    . /etc/bash_completion" >> /root/.bashrc
 echo "fi" >> /root/.bashrc
 echo "" >> /root/.bashrc
+echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
 
 EOF
 
-USER ${USERNAME}
 # exec
 ENTRYPOINT ["/bin/bash", "/startup.sh"]
+# docker run -it -v /tmp/.x11-unix:/tmp/.x11-unix --env DISPLAY=$DISPLAY --name gazebo --privileged --net host gazebo_image:latest /bin/bash
+# ros2 launch ros_gz_sim_demos air_pressure.launch.py
+# git clone https://github.com/osrf/gazebo_models.git
+
+# source /opt/ros/humble/setup.bash
+# export TURTLEBOT3_MODEL=waffle
+# export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:/opt/ros/humble/share/turtlebot3_gazebo/models
+
+# ros2 launch nav2_bringup tb3_simulation_launch.py headless:=False
